@@ -61,12 +61,10 @@ CREATE TABLE IF NOT EXISTS payments (
   note        text,
   paid_at     timestamptz NOT NULL DEFAULT now()
 );
-CREATE TABLE IF NOT EXISTS synced_orders (
-  merchant_id bigint NOT NULL,
-  order_ref   text NOT NULL,
-  PRIMARY KEY (merchant_id, order_ref)
-);
 CREATE INDEX IF NOT EXISTS members_merchant_idx ON members (merchant_id);
+-- Dedup imported orders on the payment we record, so a paid order is enrolled
+-- at most once (idempotent re-sync).
+CREATE UNIQUE INDEX IF NOT EXISTS payments_order_uidx ON payments (merchant_id, order_ref) WHERE order_ref IS NOT NULL;
 `;
 
 const app = express();
@@ -222,9 +220,9 @@ app.post("/api/sync", core.requireSession, async (req, res) => {
       if (!isPaid(o)) continue;
       const ref = String(o.id ?? o.code ?? "");
       if (!ref) continue;
-      const seen = await db.one("SELECT 1 FROM synced_orders WHERE merchant_id=$1 AND order_ref=$2", [mid, ref]);
+      // Idempotent: skip if we already recorded a dues payment for this order.
+      const seen = await db.one("SELECT 1 FROM payments WHERE merchant_id=$1 AND order_ref=$2", [mid, ref]);
       if (seen) continue;
-      await db.run("INSERT INTO synced_orders (merchant_id, order_ref) VALUES ($1,$2) ON CONFLICT DO NOTHING", [mid, ref]);
       const c = o.customer || {};
       const contact = c.phone || c.email || null;
       if (!contact) continue;
@@ -241,17 +239,22 @@ app.post("/api/sync", core.requireSession, async (req, res) => {
         enrolled += 1;
       }
       const iv = intervalFor(member.plan_period, 1);
-      await db.tx(async (cx) => {
-        await cx.query(
-          `UPDATE members SET paid_through = (GREATEST(COALESCE(paid_through, current_date), current_date) + $2::interval)::date WHERE id=$1`,
-          [member.id, iv],
-        );
-        await cx.query(
-          "INSERT INTO payments (merchant_id, member_id, amount, periods, order_ref, note) VALUES ($1,$2,$3,1,$4,$5)",
-          [mid, member.id, num(o.total ?? o.amount, 0), ref, `Order ${ref}`],
-        );
-      });
-      matched += 1;
+      try {
+        await db.tx(async (cx) => {
+          await cx.query(
+            "INSERT INTO payments (merchant_id, member_id, amount, periods, order_ref, note) VALUES ($1,$2,$3,1,$4,$5)",
+            [mid, member.id, num(o.total ?? o.amount, 0), ref, `Order ${ref}`],
+          );
+          await cx.query(
+            `UPDATE members SET paid_through = (GREATEST(COALESCE(paid_through, current_date), current_date) + $2::interval)::date WHERE id=$1`,
+            [member.id, iv],
+          );
+        });
+        matched += 1;
+      } catch (e) {
+        // Unique violation = another concurrent sync already took this order; skip.
+        if (e?.code !== "23505") throw e;
+      }
     }
     res.json({ matched, enrolled });
   } catch (err) {
