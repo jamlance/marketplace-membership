@@ -92,9 +92,9 @@ const UNIT = { week: "weeks", month: "months", year: "years" };
 // Postgres interval string for N periods of a plan, e.g. (month,3) → "3 months".
 const intervalFor = (period, n) => `${Math.max(1, n)} ${UNIT[period] || "months"}`;
 
-const PAID = new Set([
-  "paid", "confirmed", "prepared", "shipped", "delivered", "completed", "fulfilled",
-]);
+// Inkress order status codes: 3=paid, 4=confirmed, 9=completed.
+const PAID = new Set([3, 4, 9]);
+const isPaid = (o) => PAID.has(Number(o.status));
 
 app.get("/api/overview", core.requireSession, async (req, res) => {
   try {
@@ -205,8 +205,7 @@ app.post("/api/sync", core.requireSession, async (req, res) => {
     const orders = r?.result?.entries || r?.result || [];
     let matched = 0;
     for (const o of orders) {
-      const status = (o.status_name || o.status || "").toString().toLowerCase();
-      if (!PAID.has(status)) continue;
+      if (!isPaid(o)) continue;
       const ref = String(o.id ?? o.code ?? "");
       if (!ref) continue;
       const seen = await db.one("SELECT 1 FROM synced_orders WHERE merchant_id=$1 AND order_ref=$2", [mid, ref]);
