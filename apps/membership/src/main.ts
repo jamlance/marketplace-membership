@@ -105,12 +105,12 @@ async function renderOverview(host: HTMLElement) {
 
   host.append(
     card({
-      title: "Match recent payments",
-      action: h("button", { class: "primary", onClick: () => doSync(host) }, "Match recent orders"),
+      title: "Import from orders",
+      action: h("button", { class: "primary", onClick: () => doSync(host) }, "Import members from orders"),
       body: h(
         "p",
         { class: "bv-muted" },
-        "Records dues for members whose phone/email matches a recent paid order, and advances their paid-through date.",
+        "Enrols customers from your paid orders as members and records each order as a dues payment, advancing their paid-through date.",
       ),
     }),
   );
@@ -130,9 +130,12 @@ async function renderOverview(host: HTMLElement) {
 }
 
 async function doSync(host: HTMLElement) {
-  const r = await bvApi<{ matched: number }>("/api/sync", { method: "POST" }).catch(() => null);
+  const r = await bvApi<{ matched: number; enrolled: number }>("/api/sync", { method: "POST" }).catch(() => null);
   if (!r) return flash("Sync failed", "error");
-  flash(r.matched ? `Recorded dues for ${r.matched} member(s) from recent orders.` : "No new matching orders.", r.matched ? "success" : "info");
+  const msg = r.matched
+    ? `Imported ${r.enrolled} new member${r.enrolled === 1 ? "" : "s"} and recorded ${r.matched} dues payment${r.matched === 1 ? "" : "s"} from orders.`
+    : "No new paid orders to import.";
+  flash(msg, r.matched ? "success" : "info");
   renderOverview(host);
 }
 

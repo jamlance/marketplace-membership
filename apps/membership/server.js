@@ -95,6 +95,8 @@ const intervalFor = (period, n) => `${Math.max(1, n)} ${UNIT[period] || "months"
 // Inkress order status codes: 3=paid, 4=confirmed, 9=completed.
 const PAID = new Set([3, 4, 9]);
 const isPaid = (o) => PAID.has(Number(o.status));
+const custName = (c) =>
+  [c?.first_name, c?.last_name].filter(Boolean).join(" ") || c?.username || c?.email || "Member";
 
 app.get("/api/overview", core.requireSession, async (req, res) => {
   try {
@@ -198,12 +200,24 @@ app.post("/api/members/:id/pay", core.requireSession, async (req, res) => {
   }
 });
 
+// Enrol members from paid orders (find-or-create by contact) and record the
+// order as a dues payment, advancing paid_through. Populates the roster from
+// the merchant's real customers.
 app.post("/api/sync", core.requireSession, async (req, res) => {
   try {
     const mid = req.session.merchantId;
+    // Ensure a default plan so enrolled members have a billing period.
+    let plan = await db.one("SELECT * FROM plans WHERE merchant_id=$1 ORDER BY created_at LIMIT 1", [mid]);
+    if (!plan) {
+      plan = await db.one(
+        "INSERT INTO plans (merchant_id, name, amount, period) VALUES ($1,'General membership',0,'month') RETURNING *",
+        [mid],
+      );
+    }
     const r = await core.callInkress(req.session, "orders?limit=200&order=id desc").catch(() => null);
     const orders = r?.result?.entries || r?.result || [];
     let matched = 0;
+    let enrolled = 0;
     for (const o of orders) {
       if (!isPaid(o)) continue;
       const ref = String(o.id ?? o.code ?? "");
@@ -211,13 +225,21 @@ app.post("/api/sync", core.requireSession, async (req, res) => {
       const seen = await db.one("SELECT 1 FROM synced_orders WHERE merchant_id=$1 AND order_ref=$2", [mid, ref]);
       if (seen) continue;
       await db.run("INSERT INTO synced_orders (merchant_id, order_ref) VALUES ($1,$2) ON CONFLICT DO NOTHING", [mid, ref]);
-      const contact = o.customer?.phone || o.customer?.email || o.phone || null;
+      const c = o.customer || {};
+      const contact = c.phone || c.email || null;
       if (!contact) continue;
-      const member = await db.one(
+      let member = await db.one(
         "SELECT m.*, p.period AS plan_period FROM members m LEFT JOIN plans p ON p.id=m.plan_id WHERE m.merchant_id=$1 AND m.contact=$2 LIMIT 1",
         [mid, contact],
       );
-      if (!member) continue;
+      if (!member) {
+        member = await db.one(
+          "INSERT INTO members (merchant_id, plan_id, name, contact, customer_ref) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+          [mid, plan.id, custName(c), contact, String(c.id ?? "")],
+        );
+        member.plan_period = plan.period;
+        enrolled += 1;
+      }
       const iv = intervalFor(member.plan_period, 1);
       await db.tx(async (cx) => {
         await cx.query(
@@ -231,7 +253,7 @@ app.post("/api/sync", core.requireSession, async (req, res) => {
       });
       matched += 1;
     }
-    res.json({ matched });
+    res.json({ matched, enrolled });
   } catch (err) {
     res.status(502).json({ error: "sync_failed", message: err?.message });
   }
