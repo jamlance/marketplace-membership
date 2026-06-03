@@ -1,0 +1,31 @@
+@import "@inkress/apps-core/styles.css";
+
+/* Reputation Dashboard — account standing, limits + usage, KYC verification. */
+
+/* warn tone for pills (ok/bad/accent come from the base kit) */
+.bv-pill[data-tone="warn"] { color: oklch(0.5 0.13 70); background: oklch(0.96 0.05 80); border-color: oklch(0.85 0.08 80); }
+
+/* standing hero */
+.rd-hero { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.rd-standing { min-width: 0; }
+.rd-rating { text-align: right; }
+.rd-rating-v { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.02em; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+/* next-action list */
+.rd-actions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.rd-actions li { display: flex; align-items: flex-start; gap: 10px; font-size: 0.875rem; color: var(--ink); line-height: 1.45; }
+.rd-dot { flex: none; width: 7px; height: 7px; border-radius: 99px; background: var(--accent); margin-top: 7px; }
+
+/* usage + ladder progress bars */
+.rd-usage { margin: 6px 0 14px; }
+.rd-usage:last-child { margin-bottom: 4px; }
+.rd-usage-top { display: flex; justify-content: space-between; font-size: 0.8125rem; font-weight: 600; margin-bottom: 6px; }
+.rd-track { height: 9px; border-radius: 99px; background: var(--panel); overflow: hidden; }
+.rd-fill { height: 100%; border-radius: 99px; background: var(--accent); transition: width 0.4s var(--ease); }
+.rd-fill[data-tone="ok"] { background: oklch(0.6 0.14 155); }
+.rd-fill[data-tone="warn"] { background: oklch(0.7 0.15 70); }
+.rd-fill[data-tone="bad"] { background: oklch(0.58 0.2 25); }
+.rd-fill[data-tone="accent"] { background: var(--accent); }
+
+.rd-override { margin-top: 12px; }
+.rd-ladder-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 0.875rem; font-weight: 600; margin-bottom: 10px; flex-wrap: wrap; }
