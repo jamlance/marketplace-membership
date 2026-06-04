@@ -110,10 +110,23 @@ async function renderOverview(host: HTMLElement) {
       body: h(
         "p",
         { class: "bv-muted" },
-        "Enrols customers from your paid orders as members and records each order as a dues payment, advancing their paid-through date.",
+        "Adds customers from your paid orders to the roster as members. Sales aren't counted as dues — record each member's dues from the Roster.",
       ),
     }),
   );
+
+  if (s.behind > 0) {
+    host.append(
+      card({
+        title: "Needs attention",
+        body: emptyState({
+          icon: "alert",
+          title: `${s.behind} member${s.behind === 1 ? "" : "s"} behind on dues`,
+          text: "Open the Roster to record their payments.",
+        }),
+      }),
+    );
+  }
 
   if (!data.plans.length) {
     host.append(
@@ -130,12 +143,14 @@ async function renderOverview(host: HTMLElement) {
 }
 
 async function doSync(host: HTMLElement) {
-  const r = await bvApi<{ matched: number; enrolled: number }>("/api/sync", { method: "POST" }).catch(() => null);
+  const r = await bvApi<{ enrolled: number }>("/api/sync", { method: "POST" }).catch(() => null);
   if (!r) return flash("Sync failed", "error");
-  const msg = r.matched
-    ? `Imported ${r.enrolled} new member${r.enrolled === 1 ? "" : "s"} and recorded ${r.matched} dues payment${r.matched === 1 ? "" : "s"} from orders.`
-    : "No new paid orders to import.";
-  flash(msg, r.matched ? "success" : "info");
+  flash(
+    r.enrolled
+      ? `Added ${r.enrolled} member${r.enrolled === 1 ? "" : "s"} from orders. Record their dues from the Roster.`
+      : "No new customers to add.",
+    r.enrolled ? "success" : "info",
+  );
   renderOverview(host);
 }
 

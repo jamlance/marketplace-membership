@@ -78,6 +78,20 @@ const core = mountAppCore(app, {
 app.use(express.json());
 const db = await openPg("membership", SCHEMA);
 
+// One-time migration: earlier builds swept paid orders in as "dues payments"
+// (inflating Collected to your whole revenue and marking buyers paid-ahead).
+// Undo that — drop the order-linked dues and reset paid_through for anyone
+// left without a real, manually-recorded dues payment. Guarded so it runs once.
+async function runMigrations() {
+  await db.run(`CREATE TABLE IF NOT EXISTS _migrations (id text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`);
+  const done = await db.one(`SELECT 1 FROM _migrations WHERE id='undo_order_dues_v1'`);
+  if (done) return;
+  await db.run(`DELETE FROM payments WHERE order_ref IS NOT NULL`);
+  await db.run(`UPDATE members SET paid_through = NULL WHERE id NOT IN (SELECT DISTINCT member_id FROM payments)`);
+  await db.run(`INSERT INTO _migrations (id) VALUES ('undo_order_dues_v1') ON CONFLICT DO NOTHING`);
+}
+await runMigrations();
+
 const num = (v, d) => {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 ? n : d;
@@ -105,7 +119,7 @@ app.get("/api/overview", core.requireSession, async (req, res) => {
          (SELECT count(*) FROM members WHERE merchant_id=$1) AS members,
          (SELECT count(*) FROM members WHERE merchant_id=$1 AND paid_through >= current_date) AS current,
          (SELECT count(*) FROM members WHERE merchant_id=$1 AND (paid_through IS NULL OR paid_through < current_date)) AS behind,
-         (SELECT coalesce(sum(amount),0) FROM payments WHERE merchant_id=$1 AND paid_at > now() - interval '30 days') AS collected_30d`,
+         (SELECT coalesce(sum(amount),0) FROM payments WHERE merchant_id=$1 AND order_ref IS NULL AND paid_at > now() - interval '30 days') AS collected_30d`,
       [mid],
     );
     res.json({ plans, stats });
@@ -198,65 +212,33 @@ app.post("/api/members/:id/pay", core.requireSession, async (req, res) => {
   }
 });
 
-// Enrol members from paid orders (find-or-create by contact) and record the
-// order as a dues payment, advancing paid_through. Populates the roster from
-// the merchant's real customers.
+// Add members onto the roster from paid orders (find-or-create by contact).
+// IMPORTANT: this does NOT record any dues payment or advance paid_through —
+// membership dues are opt-in and separate from sales. An imported member starts
+// "behind" until the merchant records a real dues payment, so "Collected" only
+// ever reflects real dues, never your order revenue.
 app.post("/api/sync", core.requireSession, async (req, res) => {
   try {
     const mid = req.session.merchantId;
-    // Ensure a default plan so enrolled members have a billing period.
-    let plan = await db.one("SELECT * FROM plans WHERE merchant_id=$1 ORDER BY created_at LIMIT 1", [mid]);
-    if (!plan) {
-      plan = await db.one(
-        "INSERT INTO plans (merchant_id, name, amount, period) VALUES ($1,'General membership',0,'month') RETURNING *",
-        [mid],
-      );
-    }
     const r = await core.callInkress(req.session, "orders?limit=200&order=id desc").catch(() => null);
     const orders = r?.result?.entries || r?.result || [];
-    let matched = 0;
     let enrolled = 0;
+    const seen = new Set();
     for (const o of orders) {
       if (!isPaid(o)) continue;
-      const ref = String(o.id ?? o.code ?? "");
-      if (!ref) continue;
-      // Idempotent: skip if we already recorded a dues payment for this order.
-      const seen = await db.one("SELECT 1 FROM payments WHERE merchant_id=$1 AND order_ref=$2", [mid, ref]);
-      if (seen) continue;
       const c = o.customer || {};
       const contact = c.phone || c.email || null;
-      if (!contact) continue;
-      let member = await db.one(
-        "SELECT m.*, p.period AS plan_period FROM members m LEFT JOIN plans p ON p.id=m.plan_id WHERE m.merchant_id=$1 AND m.contact=$2 LIMIT 1",
-        [mid, contact],
+      if (!contact || seen.has(contact)) continue;
+      seen.add(contact);
+      const exists = await db.one("SELECT 1 FROM members WHERE merchant_id=$1 AND contact=$2 LIMIT 1", [mid, contact]);
+      if (exists) continue;
+      await db.run(
+        "INSERT INTO members (merchant_id, plan_id, name, contact, customer_ref) VALUES ($1,NULL,$2,$3,$4)",
+        [mid, custName(c), contact, String(c.id ?? "")],
       );
-      if (!member) {
-        member = await db.one(
-          "INSERT INTO members (merchant_id, plan_id, name, contact, customer_ref) VALUES ($1,$2,$3,$4,$5) RETURNING *",
-          [mid, plan.id, custName(c), contact, String(c.id ?? "")],
-        );
-        member.plan_period = plan.period;
-        enrolled += 1;
-      }
-      const iv = intervalFor(member.plan_period, 1);
-      try {
-        await db.tx(async (cx) => {
-          await cx.query(
-            "INSERT INTO payments (merchant_id, member_id, amount, periods, order_ref, note) VALUES ($1,$2,$3,1,$4,$5)",
-            [mid, member.id, num(o.total ?? o.amount, 0), ref, `Order ${ref}`],
-          );
-          await cx.query(
-            `UPDATE members SET paid_through = (GREATEST(COALESCE(paid_through, current_date), current_date) + $2::interval)::date WHERE id=$1`,
-            [member.id, iv],
-          );
-        });
-        matched += 1;
-      } catch (e) {
-        // Unique violation = another concurrent sync already took this order; skip.
-        if (e?.code !== "23505") throw e;
-      }
+      enrolled += 1;
     }
-    res.json({ matched, enrolled });
+    res.json({ enrolled });
   } catch (err) {
     res.status(502).json({ error: "sync_failed", message: err?.message });
   }
